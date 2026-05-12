@@ -271,7 +271,20 @@ def delete_workspace(object_id: int) -> str:
 
 @mcp.tool()
 def list_datasets() -> str:
-    """List all datasets defined in CDV."""
+    """
+    List all datasets defined in CDV.
+
+    In CDV, a dataset sits one level below a connection: a connection links to an
+    external data source (e.g. Impala), while a dataset references a specific table or
+    query within that connection.  Visuals and dashboards are always built on datasets,
+    not directly on connections.
+
+    IMPORTANT: Always call list_connections() first to understand what data sources
+    exist, then call this tool to see what datasets already exist on those connections.
+    Present both layers to the user before proceeding.  Only consider calling
+    create_dataset() if no suitable dataset exists AND the user explicitly confirms they
+    want a new one created.
+    """
     return datasets_tools.list_datasets()
 
 
@@ -284,7 +297,14 @@ def get_dataset(object_id: int) -> str:
 @mcp.tool()
 def create_dataset(body: dict) -> str:
     """
-    Create a new CDV dataset.
+    Create a new CDV dataset backed by an existing data connection.
+
+    A dataset points to a specific table or SQL query within a connection (dc_id).
+    Visuals and dashboards are built on top of datasets.
+
+    IMPORTANT: Do NOT call this without first calling list_connections() to identify
+    the right connection (dc_id) and list_datasets() to confirm no suitable dataset
+    already exists.  Always get explicit user confirmation before creating a new dataset.
 
     body fields: dc_id (int), name (str), type (str), detail (str, e.g. schema.table),
     description (str), info (object), lvname (str), settings (object).
@@ -389,7 +409,19 @@ def create_smart_visual(
 
 @mcp.tool()
 def list_connections() -> str:
-    """List all data connections defined in CDV."""
+    """
+    List all data connections defined in CDV.
+
+    A CDV data connection is the top-level link to an external database or data source
+    (e.g. Impala, Hive, Spark SQL).  Datasets are built on top of connections and point
+    to specific tables or queries within that connection.
+
+    IMPORTANT: Call this tool early in any data-related workflow to understand what
+    data sources are available.  When the user wants to work with data or create a
+    dataset, first show them the available connections and ask which one to use.
+    Only offer to create a new connection if none of the existing ones match their
+    source and the user explicitly requests it.
+    """
     return connections_tools.list_connections()
 
 
@@ -403,6 +435,9 @@ def get_connection(object_id: int) -> str:
 def create_connection(body: dict) -> str:
     """
     Create a new CDV data connection.
+
+    IMPORTANT: Do NOT call this without first calling list_connections() and confirming
+    with the user that no existing connection points to their target data source.
 
     body fields: name (str), type (str), connection_info (object with host, port, etc.).
     """

@@ -76,7 +76,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server that exposes 
 | `create_visual(body)` | Create a new visual (raw API body) |
 | `update_visual(object_id, body)` | Update a visual by ID |
 | `delete_visual(object_id)` | Delete a visual by ID |
-| `create_smart_visual(dataset_id, visual_type, title, columns, filters?)` | Create a visual via the Smart Visual API with column/dimension inference |
+| `create_smart_visual(dataset_id, visual_type, title, columns, filters?, workspace_id?)` | Create a visual via the Smart Visual API; auto-falls back to admin API (requires `workspace_id`) when the Smart endpoint is unavailable |
 
 **Supported `visual_type` values:** `trellis-bars`, `trellis-groupedbars`, `trellis-lines`, `trellis-areas`, `scatter`, `packed-bubbles`, `pie`, `radial`, `chord`, `leaflet`, `kpi`, `gauge`, `bullet`, `histogram`, `boxplot`, `table`, `crosstab`, `sparklines`, `treemap`, `dendrogram`, `network`, `combo`, `corelation`, `corelation-flow`, `calendar-heatmap`, `dashboard`
 
@@ -128,6 +128,79 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server that exposes 
 | `toggle_cprofile(body)` | Toggle cProfile tracing on/off |
 | `reset_dataconnection_cache(connection_id)` | Reset the cache for a data connection |
 | `reset_dataset_cache(dataset_id)` | Reset the cache for a dataset |
+
+## Agent Workflow Guidance
+
+### CDV Data Hierarchy
+
+CDV organizes data in three layers, each building on the one below:
+
+```
+Connection  (links to an external database, e.g. Impala, Hive, Spark SQL)
+  └── Dataset  (points to a specific table or query within that connection)
+        └── Visual / Dashboard  (chart or dashboard built on a dataset)
+```
+
+Agents must respect this hierarchy when exploring or creating resources.
+
+### Discovery — Always Check Before Creating
+
+Before creating anything, always discover what already exists at each level.
+
+**Step 1 — Connections**
+
+Call `list_connections` to see what data sources are registered in CDV.  
+Present the list to the user and identify which connection holds their data.  
+Only offer `create_connection` if no suitable connection exists **and** the user explicitly asks for one.
+
+**Step 2 — Datasets**
+
+Call `list_datasets` to see what datasets already exist (these are built on top of connections).  
+Present the results and ask the user which dataset to use.  
+Only offer `create_dataset` if no suitable dataset exists on the right connection **and** the user explicitly confirms they want a new one. Note that `create_dataset` requires a `dc_id` — the connection ID from Step 1.
+
+**Step 3 — Visuals / Dashboards**
+
+Call `list_visuals` to see what charts/dashboards already exist before building new ones.  
+Only call `create_smart_visual` or `create_visual` once the dataset has been confirmed.
+
+> **Never assume anything needs to be created.** CDV instances typically already have connections, datasets, and even visuals the user can reuse.
+
+**Correct flow:**
+
+```
+User: "Build me a bar chart of shipment costs"
+Agent: list_connections()            ← discover data sources
+Agent: "I found these connections: ..."
+Agent: list_datasets()               ← discover existing datasets
+Agent: "Which dataset should I use?"
+User: "Use supplier_shipping_performance"
+Agent: list_workspaces()             ← identify target workspace
+Agent: create_smart_visual(...)      ← now build the visual
+```
+
+**Incorrect flow (avoid):**
+
+```
+User: "Build me a bar chart of shipment costs"
+Agent: create_connection(...)        ← ❌ never skip discovery
+Agent: create_dataset(...)           ← ❌ never create without confirming first
+Agent: create_smart_visual(...)
+```
+
+### Workspace Discovery — Same Rule Applies
+
+Always call `list_workspaces` before creating a visual or dashboard. Identify the correct workspace ID from the list; only call `create_workspace` if the user explicitly requests a new one.
+
+### Visual Creation Workflow
+
+When `create_smart_visual` is used:
+
+1. Call `list_connections` → understand available data sources.
+2. Call `list_datasets` → confirm dataset with user (note which `dc_id` it belongs to).
+3. Call `list_workspaces` → identify the target workspace ID.
+4. Call `create_smart_visual` with `dataset_id`, `workspace_id`, and column specs.
+   - If the Smart Visual API returns 404 (not available on all CDV instances), the tool automatically falls back to the standard admin API using the provided `workspace_id`.
 
 ## Environment Variables
 
