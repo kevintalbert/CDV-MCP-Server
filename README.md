@@ -144,6 +144,34 @@ All other CDV chart types require configuration in **CDV's interactive builder**
 | `reset_dataconnection_cache(connection_id)` | Reset the cache for a data connection |
 | `reset_dataset_cache(dataset_id)` | Reset the cache for a dataset |
 
+## Examples
+
+### Cloudera Agent Studio — AI Assisted Supply Chain
+
+The screenshots below show the CDV MCP Server being used inside **Cloudera Agent Studio** as part of an AI-powered supply chain workflow.  The user asked a natural language question and the agent automatically:
+
+1. Discovered the available connections and datasets
+2. Explored the `procurement_transactions` table schema
+3. Planned the right visualization type and column mapping
+4. Called `create_smart_visual` to build a stacked bar chart in CDV
+5. Called `create_dashboard` to make it visible in the Logistics MCP Demo workspace
+
+**Prompt:** *"Which suppliers are driving the most urgent spend? Build a stacked bar chart in Data viz."*
+
+**Step 1 — Agent plans the visualization**
+
+The agent reasons through the dataset, identifies `supplier_name` as the dimension, `priority_code` as the color grouping, and `total_price` (sum) as the measure, then maps these to a `trellis-groupedbars` visual type.
+
+![Agent Studio — planning the urgent spend visualization](examples/agent-studio-urgent-spend-planning.png)
+
+**Step 2 — Visual created and linked in CDV**
+
+The agent confirms the visualization details, creates the chart via `create_smart_visual`, wraps it in a dashboard with `create_dashboard`, and returns a direct link to the new artifact in the Logistics MCP Demo workspace.
+
+![Agent Studio — urgent spend chart created in CDV](examples/agent-studio-urgent-spend-result.png)
+
+---
+
 ## Agent Workflow Guidance
 
 ### CDV Data Hierarchy
@@ -242,7 +270,9 @@ Add the following to the `mcpServers` section of your `claude_desktop_config.jso
       ],
       "env": {
         "CDV_BASE_URL": "https://my-cdv-instance.example.com",
-        "CDV_API_KEY": "your-api-key-here"
+        "CDV_API_KEY": "your-api-key-here",
+        "CDV_USERNAME": "vizapps_admin",
+        "CDV_PASSWORD": "vizapps_admin"
       }
     }
   }
@@ -265,7 +295,7 @@ Add the following to the `mcpServers` section of your `claude_desktop_config.jso
         "CDV_BASE_URL": "https://my-cdv-instance.example.com",
         "CDV_API_KEY": "your-api-key-here",
         "CDV_USERNAME": "vizapps_admin",
-        "CDV_PASSWORD": "your-cdv-password"
+        "CDV_PASSWORD": "vizapps_admin"
       }
     }
   }
@@ -309,14 +339,28 @@ The MCP server's transport protocol is configurable via the `MCP_TRANSPORT` envi
 
 ## Authentication
 
-The server uses two separate authentication mechanisms:
+The server uses two separate authentication mechanisms with different capability levels:
 
-| Credential | Env Var | Purpose |
-|---|---|---|
-| CDV Admin API Key | `CDV_API_KEY` | All admin CRUD, data API, connections, datasets, migrations, jobs. Uses `Authorization: apikey <key>` header. **Required.** |
-| CDV Username + Password | `CDV_USERNAME` / `CDV_PASSWORD` | Saving visual shelf configurations (column assignments) via CDV's session-authenticated apps API. **Required for charts to render.** |
+| Credential | Env Var | Required | Unlocks |
+|---|---|---|---|
+| CDV Admin API Key | `CDV_API_KEY` | **Always** | Data exploration, admin CRUD, connections, datasets, workspaces, users, groups, migrations, jobs |
+| CDV Username + Password | `CDV_USERNAME` / `CDV_PASSWORD` | **Optional** | `create_smart_visual`, `create_dashboard`, `create_visual`, `update_visual`, `delete_visual` |
 
-**Why two credentials?** CDV's admin API (`arc/adminapi/v1/visuals`) creates visual metadata (title, type, dataset) but does not persist shelf configurations (which columns appear on which axes). Shelf data is stored through CDV's UI API (`arc/reports/report/{id}`), which requires a browser-style session. Without `CDV_USERNAME`/`CDV_PASSWORD`, chart visuals will be created as empty skeletons and CDV's frontend will throw `TypeError: Cannot read properties of undefined (reading 'toUpperCase')` during rendering.
+### Without `CDV_USERNAME` / `CDV_PASSWORD`
+
+When session credentials are absent, chart and dashboard creation tools are **not registered** in the MCP server at all — they will not appear in the agent's tool list. The server operates in a read/explore-only mode for visuals:
+
+- ✅ `query_dataapi` — run SQL queries, explore data
+- ✅ `list_connections`, `list_datasets`, `list_workspaces` — discover resources
+- ✅ `list_visuals`, `get_visual` — inspect existing dashboards
+- ✅ All admin tools (users, groups, roles, datasets, etc.)
+- ❌ `create_smart_visual` — not available
+- ❌ `create_dashboard` — not available
+- ❌ `create_visual` / `update_visual` / `delete_visual` — not available
+
+### Why two credentials?
+
+CDV's admin API (`arc/adminapi/v1/visuals`) creates visual metadata (title, type, dataset) but does **not** persist shelf configurations (which columns appear on which axes). Shelf data is stored through CDV's UI API (`arc/reports/report/{id}`), which requires a browser-style session login. Without `CDV_USERNAME`/`CDV_PASSWORD`, visuals would be created as empty skeletons that render blank in CDV's frontend.
 
 The session is cached in memory and reused across tool calls within a server process.
 
