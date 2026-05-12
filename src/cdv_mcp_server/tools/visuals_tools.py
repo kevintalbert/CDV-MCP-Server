@@ -103,7 +103,13 @@ def _build_report_data(visual_type: str, title: str, columns: list[dict]) -> dic
         "user_settings": {},
         "click_behaviors": [],
     }
-    return {"report_data": report_data, "report_type": visual_type}
+    # report_derived_data must be present (even if empty) — CDV's frontend JS
+    # unconditionally reads this key and throws a TypeError if it is absent.
+    return {
+        "report_data": report_data,
+        "report_type": visual_type,
+        "report_derived_data": {},
+    }
 
 
 def _enrich_visual_response(result_text: str) -> str:
