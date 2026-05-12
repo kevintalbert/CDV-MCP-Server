@@ -74,11 +74,28 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server that exposes 
 | `create_visual(body)` | Create a new visual (raw API body) |
 | `update_visual(object_id, body)` | Update a visual by ID |
 | `delete_visual(object_id)` | Delete a visual by ID |
-| `create_smart_visual(dataset_id, visual_type, title, columns, filters?, workspace_id?)` | Create a visual via the Smart Visual API; auto-falls back to admin API (requires `workspace_id`) when the Smart endpoint is unavailable |
+| `create_smart_visual(dataset_id, visual_type, title, columns, workspace_id?)` | Create a chart visual — only exposes patterns confirmed to work via the API |
 
-**Supported `visual_type` values:** `trellis-bars`, `trellis-groupedbars`, `trellis-lines`, `trellis-areas`, `scatter`, `packed-bubbles`, `pie`, `radial`, `chord`, `leaflet`, `kpi`, `gauge`, `bullet`, `histogram`, `boxplot`, `table`, `crosstab`, `sparklines`, `treemap`, `dendrogram`, `network`, `combo`, `corelation`, `corelation-flow`, `calendar-heatmap`, `dashboard`
+**Supported `visual_type` values for `create_smart_visual`:**
 
-> Note: generic `bars` is **not** a valid type. Use `trellis-bars` for bar charts.
+| Type | Use case | Notes |
+|---|---|---|
+| `trellis-bars` | Bar chart — one measure vs. one dimension | Measure on x, dimension on y |
+| `trellis-groupedbars` | Grouped bars — one SUM measure, split by color dimension | Use `"shelf": "color_shelf"` for grouping |
+| `pie` | Pie chart — SUM measure by dimension | Dimension auto-placed on `color_shelf` |
+
+All other CDV chart types require configuration in **CDV's interactive builder** and are blocked here to prevent broken visuals.
+
+**What is blocked and why:**
+
+| Pattern | Error returned | Alternative |
+|---|---|---|
+| `count` aggregate | CDV generates `count([col])` that Impala rejects | Use `sum` on a numeric column |
+| `trellis-lines`, `scatter`, etc. | Unsupported visual type | Use CDV's builder; use `query_dataapi` for the data |
+| Columns starting with `avg_`, `sum_`, etc. as measure targets | CDV tokenizer bug produces `avg([avg_col])` | Choose a different column |
+| Date/timestamp columns as dimensions | CDV bracket conversion fails for TIMESTAMP | Use CDV's builder for time-series |
+| `filters` parameter | `WHERE ([col])` bracket SQL Impala rejects | Use `query_dataapi` for filtered queries; add filters in CDV's builder |
+| Deleting dashboards | Cascade-deletes ALL linked chart visuals | Record visual IDs first; use `delete_visual` carefully |
 
 ### Connections
 | Tool | Description |
@@ -246,7 +263,9 @@ Add the following to the `mcpServers` section of your `claude_desktop_config.jso
       ],
       "env": {
         "CDV_BASE_URL": "https://my-cdv-instance.example.com",
-        "CDV_API_KEY": "your-api-key-here"
+        "CDV_API_KEY": "your-api-key-here",
+        "CDV_USERNAME": "vizapps_admin",
+        "CDV_PASSWORD": "your-cdv-password"
       }
     }
   }
@@ -276,6 +295,8 @@ You can also create a `.env` file in the project root with your credentials:
 ```env
 CDV_BASE_URL=https://my-cdv-instance.example.com
 CDV_API_KEY=your-api-key-here
+CDV_USERNAME=vizapps_admin
+CDV_PASSWORD=your-cdv-password
 ```
 
 ## Transport
@@ -288,7 +309,16 @@ The MCP server's transport protocol is configurable via the `MCP_TRANSPORT` envi
 
 ## Authentication
 
-All requests to the CDV API are authenticated with the `Authorization: bearer <CDV_API_KEY>` header. The server first establishes a session by calling `arc/apps` with that token (which sets session cookies), then uses that session for all subsequent admin API calls — matching the CDV CML API v2 authentication pattern.
+The server uses two separate authentication mechanisms:
+
+| Credential | Env Var | Purpose |
+|---|---|---|
+| CDV Admin API Key | `CDV_API_KEY` | All admin CRUD, data API, connections, datasets, migrations, jobs. Uses `Authorization: apikey <key>` header. **Required.** |
+| CDV Username + Password | `CDV_USERNAME` / `CDV_PASSWORD` | Saving visual shelf configurations (column assignments) via CDV's session-authenticated apps API. **Required for charts to render.** |
+
+**Why two credentials?** CDV's admin API (`arc/adminapi/v1/visuals`) creates visual metadata (title, type, dataset) but does not persist shelf configurations (which columns appear on which axes). Shelf data is stored through CDV's UI API (`arc/reports/report/{id}`), which requires a browser-style session. Without `CDV_USERNAME`/`CDV_PASSWORD`, chart visuals will be created as empty skeletons and CDV's frontend will throw `TypeError: Cannot read properties of undefined (reading 'toUpperCase')` during rendering.
+
+The session is cached in memory and reused across tool calls within a server process.
 
 ---
 

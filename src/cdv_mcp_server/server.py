@@ -31,7 +31,105 @@ from cdv_mcp_server.tools import (
     workspaces_tools,
 )
 
-mcp = FastMCP(name="Cloudera Data Visualization MCP Server")
+mcp = FastMCP(
+    name="Cloudera Data Visualization MCP Server",
+    instructions="""
+You are connected to a Cloudera Data Visualization (CDV) instance.  CDV lets you
+explore data, create charts, and build dashboards on top of Impala/Hive data sources.
+
+═══════════════════════════════════════════════════════════════════
+MANDATORY WORKFLOW — follow this sequence for EVERY data question
+═══════════════════════════════════════════════════════════════════
+
+STEP 1 ─ Discover data sources
+  Call: list_connections()
+  Why:  Reveals available databases (e.g. Impala, Hive).
+        The connection ID (dc_id) is needed for raw SQL queries and dataset creation.
+
+STEP 2 ─ Discover existing datasets
+  Call: list_datasets()
+  Why:  Datasets are the named tables/views that CDV charts are built on.
+        Always re-use an existing dataset; only call create_dataset() if
+        the user explicitly asks for a new one AND none exists for that table.
+
+STEP 3 ─ Explore table columns and data
+  Call: query_dataapi(dataconnection_id=<dc_id>, query="SELECT * FROM schema.table LIMIT 5")
+  Why:  You need the exact column names before creating any visual or answering
+        any data question.  Column names are case-sensitive and CDV is strict.
+        NOTE: SQL reserved words (date, time, etc.) must be backtick-quoted in queries.
+
+STEP 4 ─ Get the workspace ID
+  Call: list_workspaces()
+  Why:  workspace_id is REQUIRED by create_smart_visual(). Without it the visual
+        cannot be created.  Choose the workspace that matches the project context
+        (e.g. "Logistics MCP Demo" or "Public").
+
+STEP 5 ─ Answer filtered/aggregated questions with query_dataapi
+  Call: query_dataapi(dataconnection_id=<dc_id>, query="SELECT ... WHERE ...")
+  Why:  create_smart_visual() does NOT support filters — CDV generates invalid SQL
+        for chart-level filters via the API.  For questions that require filtering
+        (e.g. "for Mock Vendor X only"), ALWAYS use query_dataapi to get the data
+        and present it as a table or Plotly visualization in your response.
+
+STEP 6 ─ Create CDV chart visuals (unfiltered overviews)
+  Call: create_smart_visual(dataset_id=<id>, visual_type=<type>, title=<title>,
+                             columns=[...], workspace_id=<id>)
+  Why:  Creates a persistent chart in CDV that users can interact with.
+        Only the following visual types are supported via the API:
+          • trellis-bars       — bar chart (one measure vs. one dimension)
+          • trellis-groupedbars — grouped/stacked bars (one SUM + color dimension)
+          • pie                — pie chart (one SUM + one dimension)
+        ALL other chart types require CDV's interactive builder.
+        
+  Column rules:
+    ✓ Use sum, avg, min, max as aggregate_function (count is NOT supported)
+    ✓ Use simple STRING columns as dimensions (supplier_name, item_description, etc.)
+    ✗ Do NOT use columns whose names start with avg_, sum_, min_, max_, count_
+      as aggregate targets (CDV tokenizer bug — they will fail)
+    ✗ Do NOT use date/timestamp columns as dimensions (CDV bracket conversion fails)
+    ✗ Do NOT pass filters — use query_dataapi for filtered data instead
+
+STEP 7 ─ Make charts visible — always create a dashboard
+  Call: create_dashboard(title=<title>, workspace_id=<id>, visual_ids=[<id1>, <id2>...],
+                         dataset_id=<primary_dataset_id>)
+  Why:  Chart visuals created via create_smart_visual() are INVISIBLE in the CDV UI
+        until they are placed inside a dashboard.  This step is MANDATORY.
+        WARNING: Deleting a dashboard also permanently deletes all its linked charts.
+        Save the visual IDs before deleting anything.
+
+═══════════════════════════════════════════════════════════════════
+DECISION TREE — which tool to use
+═══════════════════════════════════════════════════════════════════
+
+Question with a filter ("for Vendor X", "only Turbine Oil", etc.)
+  → query_dataapi (run SQL with WHERE clause) + present data as table/Plotly
+  → create_smart_visual for the unfiltered overview chart
+
+Time-series question ("price trend", "over time")
+  → query_dataapi to get the time-series data (present as table or Plotly)
+  → Do NOT try create_smart_visual for time-series (date dimensions fail via API)
+
+Heatmap or cross-tab question
+  → query_dataapi to get the pivot data, format it for Plotly in your response
+  → Do NOT try to create a heatmap in CDV via the API (not supported)
+
+Aggregated overview (top suppliers, spend by category, etc.)
+  → create_smart_visual with trellis-bars or trellis-groupedbars
+
+Proportion/breakdown question ("what % of spend")
+  → create_smart_visual with pie, OR query_dataapi for the numbers
+
+═══════════════════════════════════════════════════════════════════
+IMPORTANT — NEVER assume; always discover first
+═══════════════════════════════════════════════════════════════════
+
+• Never guess dataset_id, workspace_id, column names, or table names.
+• Always run Steps 1–4 before creating any visual.
+• If create_smart_visual returns an error about a column or visual type,
+  read the error's "guidance" field — it tells you exactly what to change.
+• The user cannot see the chart until you call create_dashboard.
+""",
+)
 
 # ---------------------------------------------------------------------------
 # Groups
@@ -215,7 +313,16 @@ def delete_filter_association(object_id: int) -> str:
 
 @mcp.tool()
 def list_workspaces() -> str:
-    """List all workspaces in CDV."""
+    """
+    STEP 4 of every visualization workflow — get the workspace_id required by create_smart_visual.
+
+    CDV workspaces organize visuals and dashboards (similar to folders).
+    The workspace_id returned here is a REQUIRED parameter for create_smart_visual()
+    and create_dashboard().  Without it, visual creation will fail.
+
+    Call this before creating any visual.  Choose the workspace that matches the
+    project context (e.g. a dedicated project workspace or "Public").
+    """
     return workspaces_tools.list_workspaces()
 
 
@@ -256,18 +363,27 @@ def delete_workspace(object_id: int) -> str:
 @mcp.tool()
 def list_datasets() -> str:
     """
-    List all datasets defined in CDV.
+    STEP 2 of the workflow — list all datasets (named tables/views) available in CDV.
 
-    In CDV, a dataset sits one level below a connection: a connection links to an
-    external data source (e.g. Impala), while a dataset references a specific table or
-    query within that connection.  Visuals and dashboards are always built on datasets,
-    not directly on connections.
+    In CDV: Connection → Dataset → Visual → Dashboard
+    A dataset is a named pointer to a specific table or SQL query within a connection.
+    Visuals and dashboards are built on datasets (using their numeric dataset_id).
 
-    IMPORTANT: Always call list_connections() first to understand what data sources
-    exist, then call this tool to see what datasets already exist on those connections.
-    Present both layers to the user before proceeding.  Only consider calling
-    create_dataset() if no suitable dataset exists AND the user explicitly confirms they
-    want a new one created.
+    AFTER calling this tool, you will have dataset names and IDs, but NOT column names.
+    ALWAYS follow up with:
+      query_dataapi(dataconnection_id=<dc_id>, query="SELECT * FROM <schema.table> LIMIT 3")
+    to discover the exact column names before creating any visual.
+
+    Workflow reminder:
+      1. list_connections()  → find dc_id (connection ID for SQL queries)
+      2. list_datasets()     → find dataset_id and table name (THIS TOOL)
+      3. query_dataapi(...)  → discover column names and sample data  ← DO THIS NEXT
+      4. list_workspaces()   → find workspace_id for visual creation
+      5. create_smart_visual(...)
+      6. create_dashboard(...)
+
+    Only call create_dataset() if no suitable dataset exists AND the user explicitly
+    confirms they want a new one.  Always confirm with the user before creating anything.
     """
     return datasets_tools.list_datasets()
 
@@ -316,7 +432,19 @@ def delete_dataset(object_id: int) -> str:
 @mcp.tool()
 def list_visuals(dataset_id: int | None = None, workspace_id: int | None = None) -> str:
     """
-    List CDV visuals. Optionally filter by dataset_id or workspace_id.
+    List CDV visuals (dashboards). Optionally filter by dataset_id or workspace_id.
+
+    IMPORTANT — CDV API LIMITATION:
+    This endpoint only returns dashboard-type visuals (type="dashboard").
+    Standalone chart visuals created via create_smart_visual() are NOT included in this
+    listing even when they exist in the workspace.
+
+    To work with standalone chart visuals:
+      - Use get_visual(object_id) with the id returned when the visual was created.
+      - Use create_dashboard() to group multiple chart visuals into a visible dashboard.
+
+    After creating chart visuals with create_smart_visual(), always call create_dashboard()
+    to combine them into a single navigable dashboard so the user can see them in the CDV UI.
     """
     return visuals_tools.list_visuals(dataset_id=dataset_id, workspace_id=workspace_id)
 
@@ -346,8 +474,59 @@ def update_visual(object_id: int, body: dict) -> str:
 
 @mcp.tool()
 def delete_visual(object_id: int) -> str:
-    """Delete a CDV visual by its numeric ID."""
+    """
+    Delete a CDV visual or dashboard by its numeric ID.
+
+    WARNING — CASCADE DELETION: Deleting a dashboard (type="dashboard") also
+    permanently deletes ALL chart visuals linked to it as widgets.  If you need
+    to preserve the chart visuals, note their IDs before deleting the dashboard.
+    """
     return visuals_tools.delete_visual(object_id)
+
+
+@mcp.tool()
+def create_dashboard(
+    title: str,
+    workspace_id: int,
+    visual_ids: list[int],
+    dataset_id: int | None = None,
+    description: str = "",
+) -> str:
+    """
+    Create a CDV dashboard that groups one or more chart visuals into a single visible view.
+
+    Use this tool after create_smart_visual() to make charts visible in the CDV workspace UI.
+    Chart visuals created via the API are standalone artifacts; they only appear in the
+    CDV workspace when placed inside a dashboard.
+
+    visual_ids: list of visual IDs to include (in display order, left-to-right, top-to-bottom).
+                Record these IDs — deleting the dashboard also deletes all linked visuals.
+    workspace_id: the workspace where the dashboard will be created (from list_workspaces()).
+    dataset_id: optional — the primary dataset for the dashboard (for global filter context).
+                Use the dataset_id shared by most of the included visuals.
+    description: optional short description shown in the workspace.
+
+    Visuals are automatically tiled in a 2-column grid.  Odd trailing visuals span full width.
+
+    WARNING: Deleting a dashboard (via delete_visual) permanently deletes all linked chart
+    visuals.  Always save the visual IDs before deleting a dashboard.
+
+    Returns the new dashboard's id and url.
+
+    Example workflow:
+      1. call list_workspaces()               → choose workspace_id
+      2. call list_datasets()                 → confirm dataset_id with the user
+      3. call create_smart_visual() × N       → collect visual_ids
+      4. call create_dashboard(title="My Dashboard", workspace_id=4,
+                               visual_ids=[131, 132, 133], dataset_id=12)
+    """
+    return visuals_tools.create_dashboard(
+        title=title,
+        workspace_id=workspace_id,
+        visual_ids=visual_ids,
+        dataset_id=dataset_id,
+        description=description,
+    )
 
 
 @mcp.tool()
@@ -356,34 +535,77 @@ def create_smart_visual(
     visual_type: str,
     title: str,
     columns: list[dict],
-    filters: list[dict] | None = None,
     workspace_id: int | None = None,
 ) -> str:
     """
-    Create a CDV visual using the Smart Visual API.
+    Create a CDV chart visual that reliably renders data without SQL errors.
 
-    If the Smart Visual API endpoint is unavailable on this CDV instance (HTTP 404),
-    the tool automatically falls back to the standard admin API and builds the visual
-    shelf configuration from the provided columns.  In that case workspace_id is
-    required — call list_workspaces() first to obtain the correct ID.
+    This tool only exposes visual types and column configurations that are
+    confirmed to work through the CDV API.  Unsupported patterns are rejected
+    with a clear error and guidance on what to use instead.
 
-    visual_type must be one of:
-      trellis-bars, trellis-groupedbars, trellis-lines, trellis-areas,
-      scatter, packed-bubbles, pie, radial, chord, leaflet,
-      kpi, gauge, bullet, histogram, boxplot,
-      table, crosstab, sparklines, treemap, dendrogram, network,
-      combo, corelation, corelation-flow, calendar-heatmap, dashboard.
+    SUPPORTED visual_type values:
+      - "trellis-bars"       Best for one measure vs. one dimension (horizontal bars).
+      - "trellis-groupedbars" One SUM measure grouped by a color dimension.
+      - "pie"                One SUM measure broken down by one dimension.
+
+    NOT SUPPORTED via this tool (use CDV's interactive builder instead):
+      - trellis-lines, trellis-areas  (time-series; timestamp dimensions fail via API)
+      - scatter, histogram, boxplot   (require CDV builder shelf configuration)
+      - table, crosstab               (use query_dataapi for tabular results)
+      - All other chart types
 
     Each entry in columns must have:
-      - column_name (str, required): the dataset column to use
-      - aggregate_function (str, optional): sum | avg | min | max | count
-        Columns with an aggregate_function are treated as measures; without are dimensions.
+      - column_name (str, required): exact column name in the dataset.
+      - aggregate_function (str, optional): sum | avg | min | max
+        Columns WITH this field are measures; columns WITHOUT are dimensions.
+        IMPORTANT: "count" is not supported — use "sum" on a numeric column instead.
+      - shelf (str, optional): explicit shelf override.
+        Use "color_shelf" to add a grouping/color dimension to bar or pie charts.
 
-    filters is an optional list of filter definitions (defaults to no filters).
+    COLUMN COMPATIBILITY RULES (enforced, CDV-side constraints):
+      - At least one measure (column with aggregate_function) is required.
+      - Column names that start with avg_, sum_, min_, max_, count_ CANNOT be
+        used as aggregate targets (CDV's tokenizer confuses them with functions).
+        Example: avg(avg_lead_time_days) fails. Use a different column.
+      - Date/timestamp columns (names with "date", "time", "year", etc.) should
+        NOT be used as dimensions — CDV fails to generate valid SQL for them.
+        Use CDV's builder for time-series charts.
+
+    FILTERS ARE NOT SUPPORTED:
+      CDV's filter SQL generation always produces bracket notation in the WHERE
+      clause that Impala cannot parse.  After creating the visual, open it in
+      CDV's interactive builder to add filters manually.
+
+    EXAMPLES:
+
+      Total spend by supplier (bar chart):
+        columns=[
+          {"column_name": "supplier_name"},
+          {"column_name": "total_price", "aggregate_function": "sum"},
+        ]
+
+      Supplier spend grouped by priority (grouped bar):
+        visual_type="trellis-groupedbars",
+        columns=[
+          {"column_name": "supplier_name"},
+          {"column_name": "priority_code", "shelf": "color_shelf"},
+          {"column_name": "total_price", "aggregate_function": "sum"},
+        ]
+
+      Spend breakdown by item (pie chart):
+        visual_type="pie",
+        columns=[
+          {"column_name": "item_description"},
+          {"column_name": "total_price", "aggregate_function": "sum"},
+        ]
+
+    VISIBILITY: Chart visuals do NOT appear in the CDV workspace until you call
+    create_dashboard() with their IDs.  Always follow up with create_dashboard().
 
     Returns the created visual's metadata including its id, visual_id, and url.
     """
-    return visuals_tools.create_smart_visual(dataset_id, visual_type, title, columns, filters, workspace_id)
+    return visuals_tools.create_smart_visual(dataset_id, visual_type, title, columns, workspace_id)
 
 
 # ---------------------------------------------------------------------------
@@ -394,17 +616,23 @@ def create_smart_visual(
 @mcp.tool()
 def list_connections() -> str:
     """
-    List all data connections defined in CDV.
+    STEP 1 of every data workflow — list all CDV data connections.
 
-    A CDV data connection is the top-level link to an external database or data source
-    (e.g. Impala, Hive, Spark SQL).  Datasets are built on top of connections and point
-    to specific tables or queries within that connection.
+    A data connection is the top-level link to an external database (Impala, Hive, etc.).
+    The connection's numeric ID (dc_id / dataconnection_id) is used when:
+      • Querying raw SQL via query_dataapi(dataconnection_id=<id>, query="SELECT ...")
+      • Creating a new dataset with create_dataset(body={"dc_id": <id>, ...})
 
-    IMPORTANT: Call this tool early in any data-related workflow to understand what
-    data sources are available.  When the user wants to work with data or create a
-    dataset, first show them the available connections and ask which one to use.
-    Only offer to create a new connection if none of the existing ones match their
-    source and the user explicitly requests it.
+    WORKFLOW — always run this FIRST, then:
+      1. list_connections()           → identify the right connection and its ID
+      2. list_datasets()              → find existing datasets built on that connection
+      3. query_dataapi(...)           → explore table columns and sample data
+      4. list_workspaces()            → get workspace_id for visual creation
+      5. create_smart_visual(...)     → create charts
+      6. create_dashboard(...)        → make charts visible in CDV
+
+    Never create a new connection unless the user explicitly requests it and no
+    existing connection points to their data source.
     """
     return connections_tools.list_connections()
 
@@ -486,15 +714,59 @@ def query_dataapi(
     filters: str | None = None,
 ) -> str:
     """
-    Query data via the CDV Data API (/apps/dataapi).
+    STEP 3 & 5 of the workflow — explore columns, answer filtered questions, get raw data.
 
-    Dataset-based querying: provide dataset (ID), optionally limit,
-    dimensions (comma-separated column names), aggregates (comma-separated expressions),
-    filters (comma-separated filter expressions).
+    This is the MOST IMPORTANT tool for data exploration and filtered analysis.
+    It runs arbitrary SQL against the database and returns structured results.
 
-    Connection-based querying: provide dataconnection_id and a SQL query string.
+    Returns: {"columns": [...], "rows": [{col: val}, ...]}
+
+    ══ USE THIS TOOL FOR ══════════════════════════════════════════════════════
+
+    1. COLUMN DISCOVERY (Step 3) — always do this before creating any visual:
+       query_dataapi(dataconnection_id=10,
+                     query="SELECT * FROM schema.table_name LIMIT 3")
+       → reveals exact column names, data types, and sample values.
+       → column names are case-sensitive; use EXACTLY as returned here.
+
+    2. FILTERED QUESTIONS — when the user asks about a specific subset of data:
+       "Show shipping codes for Mock Vendor X"
+       "What is Turbine Oil's price trend?"
+       "Which priority-1 orders are overdue?"
+       → create_smart_visual() CANNOT apply filters (CDV API limitation).
+       → Use this tool with a WHERE clause instead, then present results as a table.
+
+    3. COUNT / FREQUENCY questions — when the user wants counts:
+       "What are the most common shipping codes?"
+       → create_smart_visual() does NOT support COUNT aggregation.
+       → Use this tool: query="SELECT col, COUNT(*) as cnt FROM ... GROUP BY col ORDER BY cnt DESC"
+
+    4. TIME-SERIES queries — price trends, monthly patterns, etc.:
+       → Time-based CDV visuals are blocked via the API.
+       → Use this tool to fetch the trend data, then describe it or format it for Plotly.
+
+    5. HEATMAPS / CROSS-TABS — e.g. "spend by destination and shipping code":
+       → CDV has no heatmap type via the API.
+       → Use this tool to get the pivot data, format it for plotly.graph_objects.Heatmap.
+
+    ══ HOW TO USE ═════════════════════════════════════════════════════════════
+
+    Connection-based SQL (RECOMMENDED — most flexible):
+      query_dataapi(dataconnection_id=<id_from_list_connections>,
+                    query="SELECT col1, SUM(col2) FROM schema.table WHERE col3='val'
+                           GROUP BY col1 ORDER BY 2 DESC LIMIT 20")
+
+    Important SQL notes:
+      • Table names use schema.table format (e.g. logistics.procurement_transactions)
+      • SQL reserved words (date, time, year, etc.) must be backtick-quoted:
+        ✓ SELECT `date`, `time` FROM ...   NOT: SELECT date, time FROM ...
+      • Use standard Impala/Hive SQL syntax
+
+    Dataset-based query (simpler, but less flexible):
+      query_dataapi(dataset=<id_from_list_datasets>,
+                    dimensions="col1,col2", aggregates="SUM(col3) as total", limit=20)
     """
-    return data_api_tools.query_dataapi_get(
+    return data_api_tools.query_dataapi_post(
         dataset=dataset,
         dataconnection_id=dataconnection_id,
         query=query,

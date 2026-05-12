@@ -8,7 +8,49 @@
 ## OF ANY KIND, either express or implied. Refer to the License for the specific
 ## permissions and limitations governing your use of the file.
 
+import json
+
 from cdv_mcp_server.tools.api_client import cdv_get, cdv_post_form
+
+
+def _normalize_dataapi_response(raw_text: str) -> str:
+    """
+    Normalize the CDV Data API wire format into a clean list-of-dicts response.
+
+    CDV returns:
+      { "colnames": [...], "coltypes": [...], "rows": "[[...]]", "rowcount": N, ... }
+
+    where ``rows`` is a JSON string containing an array of value arrays.
+    We convert this to:
+      { "columns": [...], "rows": [{col: val, ...}, ...], "rowcount": N }
+
+    Any response that is already a list or lacks ``colnames`` is returned as-is.
+    """
+    try:
+        data = json.loads(raw_text)
+    except Exception:
+        return raw_text
+
+    if not isinstance(data, dict) or "colnames" not in data:
+        return raw_text
+
+    colnames = data["colnames"]
+    rows_raw = data.get("rows", "[]")
+    if isinstance(rows_raw, str):
+        try:
+            rows_raw = json.loads(rows_raw)
+        except Exception:
+            rows_raw = []
+
+    result: dict = {
+        "columns": colnames,
+        "rows": [dict(zip(colnames, row)) for row in rows_raw],
+        "rowcount": data.get("rowcount", len(rows_raw)),
+    }
+    warnings = data.get("query_warnings", {})
+    if warnings.get("inf") or warnings.get("nan"):
+        result["warnings"] = warnings
+    return json.dumps(result)
 
 
 def query_dataapi_get(
@@ -43,7 +85,7 @@ def query_dataapi_get(
         params["aggregates"] = aggregates
     if filters is not None:
         params["filters"] = filters
-    return cdv_get("arc/apps/dataapi", params=params)
+    return _normalize_dataapi_response(cdv_get("arc/apps/dataapi", params=params))
 
 
 def query_dataapi_post(
@@ -73,7 +115,7 @@ def query_dataapi_post(
         data["aggregates"] = aggregates
     if filters is not None:
         data["filters"] = filters
-    return cdv_post_form("arc/apps/dataapi", data=data)
+    return _normalize_dataapi_response(cdv_post_form("arc/apps/dataapi", data=data))
 
 
 def query_enhanced_data_api_get(

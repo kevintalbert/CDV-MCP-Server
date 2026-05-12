@@ -10,6 +10,7 @@
 
 import json
 import os
+import threading
 from urllib.parse import urljoin
 
 import requests
@@ -27,6 +28,135 @@ def get_api_key() -> str:
     if not api_key:
         raise ValueError("CDV_API_KEY environment variable is not set.")
     return api_key
+
+
+# ---------------------------------------------------------------------------
+# Session authentication (CDV_USERNAME + CDV_PASSWORD)
+# Required for saving visual shelf configurations via arc/reports/report
+# ---------------------------------------------------------------------------
+
+_session_lock = threading.Lock()
+_cached_session: requests.Session | None = None
+
+
+def _get_credentials() -> tuple[str, str] | None:
+    """Return (username, password) if CDV_USERNAME and CDV_PASSWORD are set, else None."""
+    username = os.getenv("CDV_USERNAME", "")
+    password = os.getenv("CDV_PASSWORD", "")
+    if username and password:
+        return username, password
+    return None
+
+
+def get_cdv_session() -> requests.Session | None:
+    """
+    Return an authenticated CDV session using CDV_USERNAME and CDV_PASSWORD.
+    The session is cached per-process and reused across calls.
+    Returns None if credentials are not configured.
+    """
+    global _cached_session
+    creds = _get_credentials()
+    if not creds:
+        return None
+
+    with _session_lock:
+        # Reuse existing session if still valid
+        if _cached_session is not None:
+            try:
+                base = get_base_url()
+                r = _cached_session.get(f"{base}arc/apps/home", timeout=10, allow_redirects=False)
+                if r.status_code in (200, 302) and "login" not in r.headers.get("Location", ""):
+                    return _cached_session
+            except Exception:
+                pass
+            _cached_session = None
+
+        username, password = creds
+        session = requests.Session()
+        base = get_base_url()
+        try:
+            # Fetch CSRF token
+            r0 = session.get(f"{base}arc/apps/login", timeout=15)
+            csrf = session.cookies.get("arccsrftoken", "")
+
+            # Authenticate
+            r1 = session.post(
+                f"{base}arc/apps/login",
+                data={
+                    "username": username,
+                    "password": password,
+                    "csrfmiddlewaretoken": csrf,
+                },
+                headers={
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Referer": f"{base}arc/apps/login",
+                    "X-CSRFToken": csrf,
+                },
+                allow_redirects=True,
+                timeout=15,
+            )
+            if "arcsessionid" not in session.cookies:
+                return None
+            _cached_session = session
+            return session
+        except Exception:
+            return None
+
+
+def cdv_save_visual_config(
+    visual_id: int,
+    report_type: str,
+    report_data: dict,
+    dataset_id: int,
+    workspace_id: int,
+    description: str = "",
+) -> bool:
+    """
+    Save a visual's shelf configuration via CDV's session-authenticated reports endpoint.
+    This is the only way to persist report_data (shelf definitions) in CDV.
+    The admin API creates visual metadata but does not store shelf configs.
+
+    The POST format exactly mirrors CDV's builder JS:
+        R = JSON.stringify({report_type: D, report_data: F})
+        $.post(reportUrl + "/" + report_id, {dataset_id, report_type, report_data: R, report_id, csrfmiddlewaretoken})
+
+    Shelf entries must use ``dataset_coltype`` (not ``col_type``) with CDV's
+    DataTypeEnum values: "STRING", "NUMERIC", "TIMESTAMP", "BOOLEAN".
+
+    Returns True on success, False if credentials are unavailable or save fails.
+    """
+    session = get_cdv_session()
+    if session is None:
+        return False
+
+    try:
+        base = get_base_url()
+        csrf = session.cookies.get("arccsrftoken", "")
+
+        # Matches CDV builder JS: R = JSON.stringify({report_type: D, report_data: F})
+        report_data_str = json.dumps({
+            "report_type": report_type,
+            "report_data": report_data,
+        })
+
+        r = session.post(
+            f"{base}arc/reports/report/{visual_id}",
+            data={
+                "dataset_id": str(dataset_id),
+                "report_type": report_type,
+                "report_data": report_data_str,
+                "report_id": str(visual_id),
+                "csrfmiddlewaretoken": csrf,
+            },
+            headers={
+                "X-CSRFToken": csrf,
+                "Referer": f"{base}arc/apps/",
+            },
+            timeout=30,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
 
 
 def _json_headers() -> dict:
