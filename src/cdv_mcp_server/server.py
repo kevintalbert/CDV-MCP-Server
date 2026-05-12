@@ -92,25 +92,9 @@ def get_user(object_id: int) -> str:
 
 
 @mcp.tool()
-def create_user(body: dict) -> str:
-    """
-    Create a new CDV user.
-
-    body fields: username, email, first_name, last_name, password, groups, roles.
-    """
-    return users_tools.create_user(body)
-
-
-@mcp.tool()
 def update_user(object_id: int, body: dict) -> str:
     """Update an existing CDV user by their numeric ID."""
     return users_tools.update_user(object_id, body)
-
-
-@mcp.tool()
-def delete_user(object_id: int) -> str:
-    """Delete a CDV user by their numeric ID."""
-    return users_tools.delete_user(object_id)
 
 
 @mcp.tool()

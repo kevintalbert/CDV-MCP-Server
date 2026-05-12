@@ -18,9 +18,7 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server that exposes 
 |------|-------------|
 | `list_users` | List all users |
 | `get_user(object_id)` | Get a user by ID |
-| `create_user(body)` | Create a new user |
 | `update_user(object_id, body)` | Update a user by ID |
-| `delete_user(object_id)` | Delete a user by ID |
 | `edit_user_profile(username, body)` | Edit a user's profile by username |
 
 ### Roles
