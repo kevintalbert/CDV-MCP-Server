@@ -43,6 +43,85 @@ VALID_VISUAL_TYPES = {
 
 VALID_AGGS = {"sum", "avg", "min", "max", "count"}
 
+# Maps aggregate_function name → CDV fn_type integer
+_AGG_FN_TYPE: dict[str, int] = {
+    "count": 1,
+    "avg": 2,
+    "sum": 3,
+    "min": 4,
+    "max": 5,
+}
+
+
+def _shelf_entry(col_name: str, agg: str | None = None) -> dict:
+    """Build a single CDV shelf entry dict."""
+    return {
+        "dataset_colname": col_name,
+        "col_alias": col_name,
+        "fn_type": _AGG_FN_TYPE.get(agg, 0) if agg else 0,
+        "fn_name": agg or "",
+    }
+
+
+def _build_report_data(visual_type: str, title: str, columns: list[dict]) -> dict:
+    """
+    Construct a CDV report_data payload from a normalised column list.
+
+    Columns that carry an ``aggregate_function`` are treated as measures;
+    all others are dimensions.  Shelf assignment depends on visual_type:
+
+    * table / crosstab / sparklines — all columns on x_shelf
+    * pie                           — dims on color_shelf, measures on theta_shelf
+    * everything else               — dims on x_shelf, measures on y_shelf
+    """
+    dimensions = [_shelf_entry(c["column_name"]) for c in columns if not c.get("aggregate_function")]
+    measures = [_shelf_entry(c["column_name"], c["aggregate_function"]) for c in columns if c.get("aggregate_function")]
+
+    if visual_type in {"table", "crosstab", "sparklines"}:
+        x_shelf, y_shelf, color_shelf, theta_shelf = dimensions + measures, [], [], []
+    elif visual_type == "pie":
+        x_shelf, y_shelf, color_shelf, theta_shelf = [], [], dimensions, measures
+    else:
+        x_shelf, y_shelf, color_shelf, theta_shelf = dimensions, measures, [], []
+
+    report_data = {
+        "report_title": title,
+        "report_subtitle": "",
+        "selected_segments": [],
+        "filters_shelf": [],
+        "x_shelf": x_shelf,
+        "y_shelf": y_shelf,
+        "color_shelf": color_shelf,
+        "theta_shelf": theta_shelf,
+        "tooltip_shelf": [],
+        "dimensions_shelf": [],
+        "aggregates_shelf": [],
+        "sort_orders_asc": [],
+        "limit": 50,
+        "sample_pct": 100,
+        "settings": {},
+        "user_settings": {},
+        "click_behaviors": [],
+    }
+    return {"report_data": report_data, "report_type": visual_type}
+
+
+def _enrich_visual_response(result_text: str) -> str:
+    """Attach ``visual_id`` and ``url`` fields to a visual API response when an ``id`` is present."""
+    try:
+        result = json.loads(result_text)
+        if isinstance(result, list) and result:
+            result = result[0]
+        if isinstance(result, dict) and "id" in result and "error" not in result:
+            result["visual_id"] = result["id"]
+            try:
+                result["url"] = urljoin(get_base_url(), f"arc/apps/app/{result['id']}")
+            except Exception:
+                pass
+        return json.dumps(result)
+    except Exception:
+        return result_text
+
 
 def list_visuals(dataset_id: int | None = None, workspace_id: int | None = None) -> str:
     params: dict = {}
@@ -63,11 +142,11 @@ def create_visual(body: dict) -> str:
     Required body fields: title, type, dataset_id, workspace_id.
     Optional: description, data (visual spec JSON object), perm.
     """
-    return cdv_post_admin(_BASE, body)
+    return _enrich_visual_response(cdv_post_admin(_BASE, body))
 
 
 def update_visual(object_id: int, body: dict) -> str:
-    return cdv_post_admin(f"{_BASE}/{object_id}", body)
+    return _enrich_visual_response(cdv_post_admin(f"{_BASE}/{object_id}", body))
 
 
 def delete_visual(object_id: int) -> str:
@@ -80,16 +159,21 @@ def create_smart_visual(
     title: str,
     columns: list[dict],
     filters: Optional[list[dict]] = None,
+    workspace_id: Optional[int] = None,
 ) -> str:
     """
-    Create a CDV visual using the Smart Visual API (arc/adminapi/v1/visuals/smart).
+    Create a CDV visual using the Smart Visual API, with automatic fallback to the
+    admin API when the Smart Visual endpoint is unavailable (HTTP 404).
 
     Each entry in `columns` must have:
       - column_name (str, required)
       - aggregate_function (str, optional): sum | avg | min | max | count
-        Columns with an aggregate_function are measures; without are dimensions.
+        Columns with an aggregate_function are treated as measures; without are dimensions.
 
-    Returns the created visual metadata including id, visual_id, and url.
+    workspace_id is required when the Smart Visual API is unavailable so the fallback
+    admin-API path can create the visual in the correct workspace.
+
+    Returns the created visual's metadata including its id, visual_id, and url.
     """
     if not columns:
         return json.dumps({"error": "`columns` cannot be empty."})
@@ -97,7 +181,7 @@ def create_smart_visual(
     if visual_type not in VALID_VISUAL_TYPES:
         return json.dumps({"error": f"Invalid visual_type '{visual_type}'. Must be one of: {sorted(VALID_VISUAL_TYPES)}"})
 
-    validated = []
+    validated: list[dict] = []
     for col in columns:
         if "column_name" not in col:
             return json.dumps({"error": f"Each column must have a 'column_name'. Got: {col}"})
@@ -109,20 +193,52 @@ def create_smart_visual(
             entry["aggregate_function"] = agg
         validated.append(entry)
 
-    data = {
+    # --- Attempt the Smart Visual API endpoint first ---
+    form_data = {
         "dataset_id": str(dataset_id),
         "columns": json.dumps(validated),
         "filters": json.dumps(filters or []),
         "type": visual_type,
         "title": title,
     }
+    result_text = cdv_post_form("arc/adminapi/v1/visuals/smart", data=form_data)
 
-    result_text = cdv_post_form("arc/adminapi/v1/visuals/smart", data=data)
     try:
         result = json.loads(result_text)
-        if isinstance(result, dict) and "id" in result:
-            result["visual_id"] = result["id"]
-            result["url"] = urljoin(get_base_url(), f"arc/apps/app/{result['id']}")
-        return json.dumps(result)
     except Exception:
         return result_text
+
+    # If the Smart Visual endpoint is not available on this instance, fall back to
+    # the standard admin API and build the report_data shelf spec ourselves.
+    if isinstance(result, dict) and result.get("status_code") == 404:
+        if workspace_id is None:
+            return json.dumps({
+                "error": (
+                    "Smart Visual API is not available on this CDV instance (HTTP 404). "
+                    "Please provide workspace_id so the fallback admin-API path can be used."
+                ),
+                "hint": "Call list_workspaces() to find the correct workspace_id, then retry with workspace_id set.",
+            })
+
+        data_spec = _build_report_data(visual_type, title, validated)
+        body: dict = {
+            "title": title,
+            "type": visual_type,
+            "description": "",
+            "dataset_id": int(dataset_id),
+            "workspace_id": workspace_id,
+            "data": data_spec,
+        }
+        result_text = cdv_post_admin(_BASE, body)
+        try:
+            result = json.loads(result_text)
+        except Exception:
+            return result_text
+
+    # Enrich the response with a direct URL regardless of which path was taken.
+    if isinstance(result, list) and result:
+        result = result[0]
+    if isinstance(result, dict) and "id" in result and "error" not in result:
+        result["visual_id"] = result["id"]
+        result["url"] = urljoin(get_base_url(), f"arc/apps/app/{result['id']}")
+    return json.dumps(result)

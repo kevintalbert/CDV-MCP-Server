@@ -149,7 +149,7 @@ Add the following to the `mcpServers` section of your `claude_desktop_config.jso
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/cloudera/cdv-mcp-server@main",
+        "git+https://github.com/kevintalbert/cdv-mcp-server@main",
         "run-server"
       ],
       "env": {

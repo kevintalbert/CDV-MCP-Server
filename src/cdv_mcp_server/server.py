@@ -353,9 +353,15 @@ def create_smart_visual(
     title: str,
     columns: list[dict],
     filters: list[dict] | None = None,
+    workspace_id: int | None = None,
 ) -> str:
     """
     Create a CDV visual using the Smart Visual API.
+
+    If the Smart Visual API endpoint is unavailable on this CDV instance (HTTP 404),
+    the tool automatically falls back to the standard admin API and builds the visual
+    shelf configuration from the provided columns.  In that case workspace_id is
+    required — call list_workspaces() first to obtain the correct ID.
 
     visual_type must be one of:
       trellis-bars, trellis-groupedbars, trellis-lines, trellis-areas,
@@ -373,7 +379,7 @@ def create_smart_visual(
 
     Returns the created visual's metadata including its id, visual_id, and url.
     """
-    return visuals_tools.create_smart_visual(dataset_id, visual_type, title, columns, filters)
+    return visuals_tools.create_smart_visual(dataset_id, visual_type, title, columns, filters, workspace_id)
 
 
 # ---------------------------------------------------------------------------
